@@ -1,0 +1,87 @@
+#!/bin/sh
+#
+# mikrotik-arpwatch     This shell script starts the mikrotik-arpwatch daemon
+#
+# chkconfig: - 86 04
+# description: mikrotik-arpwatch connects to a routerboard
+#
+### BEGIN INIT INFO
+# Provides: mikrotik-arpwatch
+# Required-Start: $local_fs $network
+# Required-Stop: $local_fs $network
+# Default-Stop: 0 1 6
+# Short-Description: This shell script starts the mikrotik-arpwatch daemon
+# Description:       mikrotik-arpwatch collects arpwatch data from the Routerboard family of routers
+### END INIT INFO
+
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+# Source networking configuration.
+. /etc/sysconfig/network
+
+# Source prog-specific configuration
+if [ -f /etc/sysconfig/mikrotik-arpwatch ]; then
+	. /etc/sysconfig/mikrotik-arpwatch
+fi
+
+# Check that networking is up.
+[ ${NETWORKING} = "no" ] && exit 0
+
+RETVAL=0
+prog="mikrotik-arpwatch"
+script="/usr/bin/mikrotik-arpwatch"
+
+[ -f $script ] || exit 0
+
+start() {
+    # Start daemon
+    echo -n "Starting $prog: "
+    daemon $script --pid-file /var/run/$prog.pid
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ]; then echo_success; else echo_failure; fi
+    echo
+    [ $RETVAL -eq 0 ] && touch /var/lock/subsys/$prog
+    return $RETVAL
+}
+
+
+stop() {
+    # Stop daemon
+    echo -n "Shutting down $prog: "
+    killproc $prog
+    RETVAL=$?
+    echo
+    [ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/$prog
+    return $RETVAL
+}
+
+# See how we were called.
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        stop
+        start
+        ;;
+    status)
+        status "$script"
+        RETVAL=$?
+        ;;
+    condrestart)
+        if status "$script" >/dev/null; then
+            stop
+            start
+        fi
+        ;;
+    *)
+        echo $"Usage: $0 {start|stop|restart|reload|status|condrestart}"
+        exit 1
+esac
+
+exit $RETVAL
+

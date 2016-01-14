@@ -111,7 +111,7 @@ def process_args():
     if not file_read_success:
        sys.stderr.write("No config files from the list %s could be read. Quitting\n" % ",".join(CONFIG_FILE))
 
-    parser = OptionParser(usage="%prog [options]",version="%prog 0.1")
+    parser = OptionParser(usage="%prog [options]",version="%prog 0.2")
 
     #Config file options
     parser.add_option("","--datafile",type="string",dest="arpwatch_datafile",
@@ -143,6 +143,21 @@ def process_args():
     parser.add_option("","--host",type="string",dest="api_host",                     
                       help="Hostname:port combo specifying the routerboard to connect to")
 
+    parser.add_option("-k","--keepalive",action="store_true",dest="api_keepalive_enabled",                     
+                      help="Enable TCP keepalive on connection to routerboard. Useful to detect loss of connection")
+    parser.add_option("-K","--no-keepalive",action="store_false",dest="api_keepalive_enabled",                     
+                      help="Disable TCP keepalive on connection to routerboard. Useful to detect loss of connection")        
+    parser.add_option("","--keepalive-time",type="int",dest="api_keepalive_time",                     
+                      help="Time in seconds before sending first keepalive probe")
+    parser.add_option("","--keepalive-probes",type="int",dest="api_keepalive_probes",                     
+                      help="Number of probe packets to send before assuming the connection is dead and raising a timeout error")
+    parser.add_option("","--keepalive-interval",type="int",dest="api_keepalive_interval",                     
+                      help="Time in seconds between probe packets")
+    parser.add_option("","--retry-interval", type="int",dest="api_retry_interval",
+                      help="""Time in seconds to wait before retrying a failed connection.
+A value of 0 will result in immediate exit. Otherwise the daemon will retry
+connections indefinitely at the specified interval""")
+        
     parser.add_option("","--include-mac",action="append",dest="patterns_include_mac",
                       help="Supply a regex which matches MAC addresses to be explicitly included in the ARP data")
     parser.add_option("","--exclude-mac",action="append",dest="patterns_exclude_mac",
@@ -168,6 +183,11 @@ def process_args():
     set_default("api","user",config,parser)
     set_default("api","password",config,parser)
     set_default("api","host",config,parser)
+    set_default("api","keepalive_enabled",config,parser)
+    set_default("api","keepalive_time",config,parser)
+    set_default("api","keepalive_probes",config,parser)
+    set_default("api","keepalive_interval",config,parser)
+    set_default("api","retry_interval",config,parser)
 
     set_default_list("patterns","include_mac",config,parser)
     set_default_list("patterns","exclude_mac",config,parser)
@@ -187,9 +207,9 @@ def process_args():
     (options,args) = parser.parse_args()
         
     return (options,args)
-        
+
 def establish_session():
-    "Create a session with the routerboard API. Failures are logged. Socket (or None in the case of failure) is returned"
+    "Create a session with the routerboard API. Failures are logged. Socket is returned or Exceptions raised in the case of failure"
     hostbits = global_options.api_host.split(":")
     if len(hostbits) == 1:
         host = hostbits[0]
@@ -201,24 +221,44 @@ def establish_session():
         ArpWatchLogging.log_message(syslog.LOG_ERR,"Host spec %s does not appear to be in host.name:port format. Aborting" % global_options.host)
         sys.exit(1)
     
-    try:
-        addr=socket.gethostbyname(host)
 
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((addr, port))  
+    addr = socket.gethostbyname(host)
 
-        apiros = RosAPI.ApiRos(s)
-        (login_ok,message)=apiros.login(global_options.api_user,global_options.api_password)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        if not login_ok:
-            ArpWatchLogging.log_message(syslog.LOG_ERR,"Login to routerboard failed. Potential Username/password issue.\nRouterboard responded: '%s' " % message)
-            return None
+    if global_options.api_keepalive_enabled:
+       x = s.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+       if (x == 0):              
+          x = s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+          s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, global_options.api_keepalive_time)
+          s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, global_options.api_keepalive_probes)
+          s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, global_options.api_keepalive_interval)
+          
+          ArpWatchLogging.log_message(syslog.LOG_NOTICE,"TCP Keepalive enabled: time=%d, probes=%d, probe_interval=%d" %
+                                      (global_options.api_keepalive_time,
+                                       global_options.api_keepalive_probes,
+                                       global_options.api_keepalive_interval))
+    else:
+       ArpWatchLogging.log_message(syslog.LOG_WARNING,
+                                   "TCP keepalive is disabled. Network disruption may cause this daemon to silently lose communication with the routerboard. Consider a periodic restart via cron to work around this potential issue")
+                                       
 
-        return apiros
-    except Exception,err:
-        ArpWatchLogging.log_message(syslog.LOG_ERR,"Error creating session to %s@%s:%s.\nReason: '%s'" % (global_options.api_user,host,port,err))
+    #TODO: Potentially set an explicit timeout here so we don't hang around for too long connecting to an unresponsive host
+    ArpWatchLogging.log_message(syslog.LOG_NOTICE, "Attempting connection to routerboard %s" % global_options.api_host)
+    s.connect((addr, port))  
+    ArpWatchLogging.log_message(syslog.LOG_NOTICE, "Connected to routerboard %s" % global_options.api_host)
+                                
+    apiros = RosAPI.ApiRos(s)
+    (login_ok,message)=apiros.login(global_options.api_user,global_options.api_password)
 
-    return None    
+    if not login_ok:
+       err_message="Login to routerboard failed. Potential Username/password issue.\nRouterboard responded: '%s' " % message
+       ArpWatchLogging.log_message(syslog.LOG_ERR, err_message)
+       s.close()
+       raise LoginError(err_message)
+
+    return apiros
+       
 
 def process_arp(response):
 
@@ -291,27 +331,55 @@ def data_mode():
                                time.strftime("%F %X %Z",time.gmtime(ArpWatchState.next_write)))
    ArpWatchLogging.log_message(syslog.LOG_INFO,"Next data cleanup write: %s" %
                                time.strftime("%F %X %Z",time.gmtime(ArpWatchState.next_cleanup)))
-        
+
+   retry_count = 0 
+   
+   #Currently dead peer detection relies on TCP keepalive. Some other possible approaches:
+   #1) PEEK a byte from each socket when it becomes available to read, if 0 bytes read then peer has gone away.
+   #
+   #2) Keep an activity timer within this daemon for each socket; when
+   #   exceeded assume the connection is dead and restart
+   #
+   #3) Periodically send /cancel command and restart /ip/arp/listen;
+   #   any attempt to write to a dead socket should cause an exception
+   #   which we can catch
+   #
+   # Some discussion: http://blog.stephencleary.com/2009/05/detection-of-half-open-dropped.html
+   #
+   # Testing keepalive:
+   #
+   # 0) Configure reasonably short timeouts
+   # 1) Create a connection as normal
+   # 2) Insert a filewall rule like
+   #       /sbin/iptables -I RH-Firewall-1-INPUT 7 -p tcp --sport 8728 -j DROP
+   #    or similar (make sure you insert this above the related or established rule)
+   # 3) Wait for the connection to die. Hopefully the daemon should then start retrying
+   # 4) Finally, remove the firewall rule and hopefully the daemon should reconnect safely
+   #
    while ArpWatchState.keep_running:
       try:
 
-         #TODO: allow multiple routerboard sessions to be established
-         #here; select will pick up the results
+         #TODO: we could allow multiple routerboard sessions to be established
+         #here; select will pick up the results for each 
 
-         rb_api=establish_session()
-         
-         if rb_api is None:
-            #TODO: may be useful to distinguish between login failures
-            #(abort immediately) or timeouts, in which case retrying
-            #is useful            
+         if retry_count > 0 and global_options.api_retry_interval <= 0:
+            ArpWatchLogging.log_message(syslog.LOG_NOTICE, "Connection retry disabled (retry_interval=%d). Shutting down cleanly." %
+                                        global_options.api_retry_interval)
             break
+         elif retry_count > 0:
+            ArpWatchLogging.log_message(syslog.LOG_NOTICE, "Waiting %d seconds before retrying connection" %
+                                        global_options.api_retry_interval)
+            time.sleep(global_options.api_retry_interval)
+            
+            
+         rb_api=establish_session()
                  
          rb_api.writeSentence(["/ip/arp/listen"])
 
          while ArpWatchState.keep_running:
             r = select.select([rb_api.sk], [], [], global_options.schedule_select_timeout )
             if rb_api.sk in r[0]: 
-               x = rb_api.readSentence()
+               x = rb_api.readSentence() 
                process_arp(x)
 
             current_time=int(time.time())
@@ -323,19 +391,34 @@ def data_mode():
             if current_time > ArpWatchState.next_write:
                global_arp_data.write_file()
                ArpWatchState.next_write=current_time+global_options.schedule_writedelay
-               
-      except select.error,select_err:
-         (errnum,message)=select_err
+
+      except socket.timeout, timeout_err:
+         (errnum,message) = timeout_err
+
+         ArpWatchLogging.log_message(syslog.LOG_ERR,"Lost connection to routerboard %s - timeout." % global_options.api_host)
+         retry_count+=1
+      except socket.error, socket_err:
+         (errnum,message) = socket_err
+
+         ArpWatchLogging.log_message(syslog.LOG_ERR,"Failed connection to routerboard %s - socket error: (%d) %s" %
+                                     (global_options.api_host,errnum,message))
+         retry_count+=1
          
-         #Ignore EINTR so signal handlers can do their thing
+      except select.error, select_err:
+         (errnum,message) = select_err
+         
+         #Ignore EINTR so signal handlers can do their thing, otherwise treat as failed connection
          if errnum!=errno.EINTR:
-            ArpWatchLogging.log_message(syslog.LOG_ERR,"select call aborted. Reason '%s'\n" % message)                    
+            ArpWatchLogging.log_message(syslog.LOG_ERR,"select call aborted. Reason '%s'\n" % message)
+            retry_count+=1
+            
       except RosAPI.ConnectionError,conn_err: 
-         ArpWatchLogging.log_message(syslog.LOG_INFO,"Lost connection to routerboard. Will attempt reconnection.")
+         ArpWatchLogging.log_message(syslog.LOG_ERR,"Lost connection to routerboard %s - %s " %
+                                     (global_options.api_host,con_err))
+         retry_count+=1
       except KeyboardInterrupt,int_err: 
          ArpWatchLogging.log_message(syslog.LOG_NOTICE,"Interrupt received, shutting down cleanly")                
-         break
-
+         break         
 
    global_arp_data.write_file()
              
@@ -531,7 +614,12 @@ class ArpWatchState:
     keep_running=True
     next_cleanup=0
     next_write=0    
-    
+
+class LoginError(Exception):
+    def __init__(self, value):
+        self.value = value
+    def __str__(self):
+        return repr(self.value)
 
     
 if __name__ == '__main__':

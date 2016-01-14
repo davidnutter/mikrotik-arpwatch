@@ -2,7 +2,7 @@
 %define debug_package %{nil}
 Summary: Tool to read ARP data from Mikrotik router API 
 Name: mikrotik-arpwatch
-Version: 0.1
+Version: 0.2
 Release: 1%{?dist}
 License: BSD
 BuildArch: noarch
@@ -50,5 +50,7 @@ fi
 %dir %attr(-,nobody,nobody) /var/lib/mikrotik-arpwatch
 
 %changelog
+* Wed Jan 13 2016 David Nutter <david.nutter@bioss.ac.uk> - mikrotik-arpwatch-0.2.el5
+- Added functioning keepalive support to detect network errors
 * Thu Mar 6 2014 David Nutter <david.nutter@bioss.ac.uk> - mikrotik-arpwatch-0.1.el5
-* Initial build
+- Initial build

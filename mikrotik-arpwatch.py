@@ -301,7 +301,7 @@ def test_mode():
                     continue
                 
             if len(line) > 0:
-                rb_sentence=rb_sentence+line                    
+                rb_sentence=rb_sentence+line
                     
         input_data.close()
 
